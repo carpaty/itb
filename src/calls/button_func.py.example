@@ -1,0 +1,859 @@
+# MIT License
+#
+# Copyright (c) 2024 carpaty https://github.com/carpaty
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+
+# -*- coding: utf-8 -*-
+
+""" Custom calls """
+
+import re
+import sys
+import os
+import socket
+from urllib import request, error
+import time
+from datetime import datetime, timezone
+import whois
+import yaml
+from google.cloud import datastore
+from google.cloud.datastore.query import PropertyFilter
+
+from telegram import InlineKeyboardMarkup, InlineKeyboardButton, Update
+from telegram.ext import ContextTypes
+import utils
+
+
+class Sql:
+    """Custom DB"""
+
+    def __init__(self):
+        self.client = datastore.Client()
+
+    def qselectall(self, kind, uid):
+        """
+        Select all entries by uid.
+
+        :param kind: The kind of the entity to query.
+        :type kind: str
+        :param uid: The unique identifier to filter by.
+        :type uid: str
+        :return: A list of entities matching the uid.
+        :rtype: list
+        """
+        query = self.client.query(kind=kind)
+        query.add_filter(filter=PropertyFilter("uid", '=', uid))
+        result = query.fetch()
+        return list(result)
+
+    def qselect_users_by_sites(self, kind, site):
+        """
+        Select users by site.
+
+        :param kind: The kind of the entity to query.
+        :type kind: str
+        :param site: The site to filter by.
+        :type site: str
+        :return: A list of entities matching the site.
+        :rtype: list
+        """
+        query = self.client.query(kind=kind)
+        query.add_filter(filter=PropertyFilter("Sites", '=', site))
+        result = query.fetch()
+        return list(result)
+
+    def qselect_sites(self, kind):
+        """
+        Select all distinct sites.
+
+        :param kind: The kind of the entity to query.
+        :type kind: str
+        :return: A list of distinct sites.
+        :rtype: list
+        """
+        query = self.client.query(kind=kind)
+        query.distinct_on = ["Sites"]
+        result = query.fetch()
+        return list(result)
+
+    def qselect_hosts(self, kind):
+        """
+        Select all hosts.
+
+        :param kind: The kind of the entity to query.
+        :type kind: str
+        :return: A list of distinct hosts.
+        :rtype: list
+        """
+        query = self.client.query(kind=kind)
+        result = query.fetch()
+        return list(result)
+
+    def qselect(self, kind, uid, data):
+        """
+        Select an entity by uid and data.
+
+        :param kind: The kind of the entity to query.
+        :type kind: str
+        :param uid: The unique identifier to filter by.
+        :type uid: str
+        :param data: The data to filter by.
+        :type data: str
+        :return: The entity matching the uid and data.
+        :rtype: Entity
+        """
+        task_key = self.client.key(kind, f"{uid}_{data}")
+        entity = self.client.get(task_key)
+        return entity
+
+    def qinsert_host(self, kind, uid, data, port, state):
+        """
+        Insert a new host entity.
+
+        :param kind: The kind of the entity to insert.
+        :type kind: str
+        :param uid: The unique identifier for the new entity.
+        :type uid: str
+        :param data: The data to associate with the entity.
+        :type data: str
+        :param port: The port number to associate with the entity.
+        :type port: int
+        :param state: The state to associate with the entity.
+        :type state: str
+        """
+        task_key = self.client.key(kind, f"{uid}_{data}_{state}")
+        task = datastore.Entity(key=task_key)
+        task["uid"] = uid
+        task[kind] = data
+        task["port"] = port
+        task["state"] = state
+        task["time"] = datetime.now(timezone.utc)
+        self.client.put(task)
+
+    def qinsert_site(self, kind, uid, data):
+        """
+        Insert a new site entity.
+
+        :param kind: The kind of the entity to insert.
+        :type kind: str
+        :param uid: The unique identifier for the new entity.
+        :type uid: str
+        :param data: The data to associate with the entity.
+        :type data: str
+        """
+        task_key = self.client.key(kind, f"{uid}_{data}")
+        task = datastore.Entity(key=task_key)
+        task["uid"] = uid
+        task[kind] = data
+        task["time"] = datetime.now(timezone.utc)
+        self.client.put(task)
+
+    def qdelete(self, kind, uid, data):
+        """
+        Delete an entity by uid and data.
+
+        :param kind: The kind of the entity to delete.
+        :type kind: str
+        :param uid: The unique identifier for the entity.
+        :type uid: str
+        :param data: The data associated with the entity.
+        :type data: str
+        """
+        task_key = self.client.key(kind, f"{uid}_{data}")
+        task = datastore.Entity(key=task_key)
+        self.client.delete(task)
+
+
+async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:  # pylint: disable=unused-argument
+    """
+    Handle button presses and respond accordingly.
+
+    :param update: Incoming update.
+    :type update: Update
+    :param context: Context for handling the update.
+    :type context: ContextTypes.DEFAULT_TYPE
+    """
+    query = update.callback_query
+    query_option = query.data
+    utils.logger.info("User: %s press button: %s",
+                      update.effective_user.id, query_option)
+
+    if query_option == "site_list":
+        await query.answer()
+        res = '\n'.join(item['Sites']
+                        for item in site_list(update.effective_user.id))
+        await query.edit_message_text(text=f"{res}", disable_web_page_preview=True)
+    elif query_option == "host_list":
+        await query.answer()
+        host_i = (f"{item['Hosts']} {item['port']} {
+                  item['state']}" for item in host_list(update.effective_user.id))
+        res = '\n'.join(host_i)
+        await query.edit_message_text(text=f"{res}", disable_web_page_preview=True)
+    elif query_option == "api_show":
+        await query.answer()
+        res = api_show(update.effective_user.id)
+        await query.edit_message_text(text=f"{res}", disable_web_page_preview=True)
+    else:
+        utils.update_button(update.effective_user.id, query_option)
+        query_text = list(utils.find_desc(query_option, utils.cfg, 'desc'))[0]
+        await query.answer()
+        await query.edit_message_text(text=f"{query_text}", disable_web_page_preview=True)
+
+
+async def button_int(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:  # pylint: disable=unused-argument
+    """
+    Handle button presses that require calling a specific method.
+
+    :param update: Incoming update.
+    :type update: Update
+    :param context: Context for handling the update.
+    :type context: ContextTypes.DEFAULT_TYPE
+    """
+    query = update.callback_query
+    utils.logger.info("User: %s press button_int: %s",
+                      update.effective_user.id, query.data)
+    query_option = query.data.split("_")
+    method_to_call = getattr(sys.modules[__name__], query_option[1])
+    res = method_to_call(update.effective_user.id,
+                         query_option[2], query_option[3])
+    await query.edit_message_text(text=f"{res}", disable_web_page_preview=True)
+
+
+def site_add(data):
+    """
+    Add a site for monitoring.
+
+    :param data: URL of the site to add.
+    :type data: str
+    :return: Confirmation text and inline keyboard markup.
+    :rtype: tuple[str, InlineKeyboardMarkup] or tuple[str, None]
+    """
+    if validate_url(data):
+        text = f"Do you want to add this site: {data}\n into monitoring?"
+        list_item_inline = [
+            InlineKeyboardButton(
+                "Yes", callback_data=f"inftrx_siteadd_yes_{data}"),
+            InlineKeyboardButton(
+                "No", callback_data=f"inftrx_siteadd_no_{data}")
+        ]
+        ver = InlineKeyboardMarkup([list_item_inline])
+        return text, ver
+    return "Wrong URL, should start with http or https", None
+
+
+def siteadd(uid, cond, data):
+    """
+    Process the addition of a site based on user confirmation.
+
+    :param uid: User ID.
+    :type uid: int or str
+    :param cond: User confirmation ('yes' or 'no').
+    :type cond: str
+    :param data: URL of the site to add.
+    :type data: str
+    :return: Success or error message.
+    :rtype: str
+    """
+    if cond == "yes":
+        if site_add_db(uid, data):
+            return f"Site: {data} has been added into monitoring"
+        return "[Error: E001] Something went wrong."
+    return "Please select option."
+
+
+def site_del(data):
+    """
+    Delete a site from monitoring.
+
+    :param data: URL of the site to delete.
+    :type data: str
+    :return: Confirmation text and inline keyboard markup.
+    :rtype: tuple[str, InlineKeyboardMarkup]
+    """
+    text = f"Do you want to del this site: {data}\n from monitoring?"
+    list_item_inline = [
+        InlineKeyboardButton(
+            "Yes", callback_data=f"inftrx_sitedel_yes_{data}"),
+        InlineKeyboardButton("No", callback_data=f"inftrx_sitedel_no_{data}")
+    ]
+    ver = InlineKeyboardMarkup([list_item_inline])
+    return text, ver
+
+
+def sitedel(uid, cond, data):
+    """
+    Process the deletion of a site based on user confirmation.
+
+    :param uid: User ID.
+    :type uid: int or str
+    :param cond: User confirmation ('yes' or 'no').
+    :type cond: str
+    :param data: URL of the site to delete.
+    :type data: str
+    :return: Success or error message.
+    :rtype: str
+    """
+    if cond == "yes":
+        if site_del_db(uid, data):
+            return f"Site: {data} has been removed from monitoring"
+        return "[Error: E002] Something went wrong. Name does not exist"
+    return "Please select option."
+
+
+def site_info(data):
+    """
+    Retrieve information about a site.
+
+    :param data: URL of the site to retrieve information for.
+    :type data: str
+    :return: Confirmation text and inline keyboard markup.
+    :rtype: tuple[str, InlineKeyboardMarkup]
+    """
+    text = f"Do you want to see site: {data}\n info?"
+    list_item_inline = [
+        InlineKeyboardButton(
+            "Yes", callback_data=f"inftrx_siteinfo_yes_{data}"),
+        InlineKeyboardButton("No", callback_data=f"inftrx_siteinfo_no_{data}")
+    ]
+    ver = InlineKeyboardMarkup([list_item_inline])
+    return text, ver
+
+
+def siteinfo(uid, cond, data):
+    """
+    Process the retrieval of site information based on user confirmation.
+
+    :param uid: User ID.
+    :type uid: int or str
+    :param cond: User confirmation ('yes' or 'no').
+    :type cond: str
+    :param data: URL of the site to retrieve information for.
+    :type data: str
+    :return: Success or error message with site information.
+    :rtype: str
+    """
+    if cond == "yes":
+        res = site_info_db(uid, data)
+        if res:
+            return f"Your site {data} has been added\n in {res['time'].strftime('%Y-%m-%d %H:%M:%S')}"
+        return "[Error: E002] Something went wrong."
+    return "Please select option."
+
+
+def site_list(uid):
+    """
+    Retrieve the list of sites being monitored for a user.
+
+    :param uid: User ID.
+    :type uid: int or str
+    :return: List of monitored sites.
+    :rtype: list[dict]
+    """
+    return site_list_db(uid)
+
+
+def site_add_db(uid, data):
+    """
+    Add a site to the database for monitoring.
+
+    :param uid: User ID.
+    :type uid: int or str
+    :param data: URL of the site to add to the database.
+    :type data: str
+    :return: True if successful.
+    :rtype: bool
+    """
+    sql = Sql()
+    sql.qinsert_site("Sites", uid, data)
+    return True
+
+
+def site_del_db(uid, data):
+    """
+    Delete a site from the database.
+
+    :param uid: User ID.
+    :type uid: int or str
+    :param data: URL of the site to delete from the database.
+    :type data: str
+    :return: True if successful.
+    :rtype: bool
+    """
+    sql = Sql()
+    sql.qdelete("Sites", uid, data)
+    return True
+
+
+def site_list_db(uid):
+    """
+    Retrieve the list of monitored sites from the database.
+
+    :param uid: User ID.
+    :type uid: int or str
+    :return: List of monitored sites.
+    :rtype: list[dict]
+    """
+    sql = Sql()
+    res = sql.qselectall("Sites", uid)
+    utils.logger.info("Site: %s ", res)
+    return res
+
+
+def site_info_db(uid, data):
+    """
+    Retrieve detailed information about a site from the database.
+
+    :param uid: User ID.
+    :type uid: int or str
+    :param data: URL of the site to retrieve information for.
+    :type data: str
+    :return: Detailed information about the site.
+    :rtype: dict or None
+    """
+    sql = Sql()
+    res = sql.qselect("Sites", uid, data)
+    utils.logger.info("Site: %s ", res)
+    return res
+
+
+def host_add(data):
+    """
+    Add a host for monitoring.
+
+    :param data: Host information including name, ports, and state (e.g., example.com 80,443 open).
+    :type data: str
+    :return: Confirmation text and inline keyboard markup.
+    :rtype: tuple[str, InlineKeyboardMarkup] or tuple[str, None]
+    """
+    if validate_host_ports(data):
+        text = f"Do you want to add this host: {data}\n into monitoring?"
+        list_item_inline = [
+            InlineKeyboardButton(
+                "Yes", callback_data=f"inftrx_hostadd_yes_{data}"),
+            InlineKeyboardButton(
+                "No", callback_data=f"inftrx_hostadd_no_{data}")
+        ]
+        ver = InlineKeyboardMarkup([list_item_inline])
+        return text, ver
+    return "Wrong host, should be example.com 80,443 open", None
+
+
+def hostadd(uid, cond, host_data):
+    """
+    Process the addition of a host based on user confirmation.
+
+    :param uid: User ID.
+    :type uid: int or str
+    :param cond: User confirmation ('yes' or 'no').
+    :type cond: str
+    :param host_data: Host information including name, ports, and state (e.g., example.com 80,443 open|closed).
+    :type host_data: str
+    :return: Success or error message.
+    :rtype: str
+    """
+    host = host_data.split(" ")
+    if cond == "yes":
+        if host_add_db(uid, host[0], host[1], host[2]):
+            return f"Host: {host_data} has been added into monitoring"
+        return "[Error: E001] Something went wrong."
+    return "Please select option."
+
+
+def host_del(data):
+    """
+    Delete a host from monitoring.
+
+    :param data: Host information including name and state (e.g., example.com open|closed).
+    :type data: str
+    :return: Confirmation text and inline keyboard markup.
+    :rtype: tuple[str, InlineKeyboardMarkup] or tuple[str, None]
+    """
+    if validate_host(data):
+        text = f"Do you want to del this host: {data}\n from monitoring?"
+        list_item_inline = [
+            InlineKeyboardButton(
+                "Yes", callback_data=f"inftrx_hostdel_yes_{data}"),
+            InlineKeyboardButton(
+                "No", callback_data=f"inftrx_hostdel_no_{data}")
+        ]
+        ver = InlineKeyboardMarkup([list_item_inline])
+        return text, ver
+    return "Wrong host, should be example.com open|closed", None
+
+
+def hostdel(uid, cond, host_data):
+    """
+    Process the deletion of a host based on user confirmation.
+
+    :param uid: User ID.
+    :type uid: int or str
+    :param cond: User confirmation ('yes' or 'no').
+    :type cond: str
+    :param data: Host name.
+    :type data: str
+    :return: Success or error message.
+    :rtype: str
+    """
+    host = host_data.split(" ")
+    if cond == "yes":
+        if host_del_db(uid, host[0], host[1]):
+            return f"Host: {host[0]} state {host[1]}has been removed from monitoring"
+        return "[Error: E002] Something went wrong. Name does not exist"
+    return "Please select option."
+
+
+def host_info(data):
+    """
+    Retrieve information about a host.
+
+    :param data: Host name.
+    :type data: str
+    :return: Confirmation text and inline keyboard markup.
+    :rtype: tuple[str, InlineKeyboardMarkup]
+    """
+    text = f"Do you want to see host: {data}\n info?"
+    list_item_inline = [
+        InlineKeyboardButton(
+            "Yes", callback_data=f"inftrx_hostinfo_yes_{data}"),
+        InlineKeyboardButton("No", callback_data=f"inftrx_hostinfo_no_{data}")
+    ]
+    ver = InlineKeyboardMarkup([list_item_inline])
+    return text, ver
+
+
+def hostinfo(uid, cond, data):
+    """
+    Process the retrieval of host information based on user confirmation.
+
+    :param uid: User ID.
+    :type uid: int or str
+    :param cond: User confirmation ('yes' or 'no').
+    :type cond: str
+    :param data: Host name.
+    :type data: str
+    :return: Success or error message with host information.
+    :rtype: str
+    """
+    if cond == "yes":
+        res = host_info_db(uid, data)
+        if res:
+            return f"Your host {data} has been added\n in {res['time'].strftime('%Y-%m-%d %H:%M:%S')}"
+        return "[Error: E002] Something went wrong."
+    return "Please select option."
+
+
+def host_list(uid):
+    """
+    Retrieve the list of hosts being monitored for a user.
+
+    :param uid: User ID.
+    :type uid: int or str
+    :return: List of monitored hosts.
+    :rtype: list[dict]
+    """
+    return host_list_db(uid)
+
+
+def host_add_db(uid, host_name, ports, state):
+    """
+    Add a host to the database for monitoring.
+
+    :param uid: User ID.
+    :type uid: int or str
+    :param host_name: Host name.
+    :type host_name: str
+    :param ports: Ports of the host.
+    :type ports: str
+    :param state: State of the host.
+    :type state: str
+    :return: True if successful.
+    :rtype: bool
+    """
+    sql = Sql()
+    sql.qinsert_host("Hosts", uid, host_name, ports, state)
+    return True
+
+
+def host_del_db(uid, host_name, state):
+    """
+    Delete a host from the database.
+
+    :param uid: User ID.
+    :type uid: int or str
+    :param host_name: Host name.
+    :type host_name: str
+    :return: True if successful.
+    :rtype: bool
+    """
+    sql = Sql()
+    sql.qdelete("Hosts", uid, f"{host_name}_{state}")
+    return True
+
+
+def host_list_db(uid):
+    """
+    Retrieve the list of monitored hosts from the database.
+
+    :param uid: User ID.
+    :type uid: int or str
+    :return: List of monitored hosts.
+    :rtype: list[dict]
+    """
+    sql = Sql()
+    res = sql.qselectall("Hosts", uid)
+    return res
+
+
+def host_info_db(uid, data):
+    """
+    Retrieve detailed information about a host from the database.
+
+    :param uid: User ID.
+    :type uid: int or str
+    :param data: Host name.
+    :type data: str
+    :return: Detailed information about the host.
+    :rtype: dict or None
+    """
+    sql = Sql()
+    res = sql.qselect("Hosts", uid, data)
+    return res
+
+
+async def worker() -> None:
+    """
+    Worker process triggered by cron to monitor sites.
+
+    This function retrieves all sites from the database and checks their status.
+    If a site is down, it notifies all users monitoring that site.
+
+    :return: None
+    :rtype: None
+    """
+    timeout = 20
+    socket.setdefaulttimeout(timeout)
+    sql = Sql()
+
+    url_all = sql.qselect_sites("Sites")
+
+    for site in url_all:
+        utils.logger.info("Monitoring: %s", site['Sites'])
+        result = ''
+        for _ in range(5):
+            time.sleep(1)
+            try:
+                with request.urlopen(site['Sites']) as _:
+                    break
+            except error.HTTPError as e:
+                result = e.code
+            except error.URLError as e:
+                result = e.reason
+        if result:
+            all_url_users = sql.qselect_users_by_sites("Sites", site['Sites'])
+            for _id in all_url_users:
+                await utils.post_tg(_id['uid'], f"Error:{result}, {site['Sites']}")
+
+    host_all = sql.qselect_hosts("Hosts")
+
+    for _host in host_all:
+        utils.logger.info("Monitoring: %s %s %s",
+                          _host['Hosts'], _host['port'], _host['state'])
+        res = nmap_host(_host['Hosts'], _host['port'])
+
+        if _host['state'] == "open" and "closed" in res.values():
+            res = {key: value for key, value in res.items() if value ==
+                   "closed"}
+            res = {
+                key: (
+                    "🟩on" if value == "open" else "🟥off" if value == "closed" else value)
+                for key, value in res.items()
+            }
+            res = yaml.dump(res, allow_unicode=True)
+            await utils.post_tg(_host['uid'], f"Error:{_host['Hosts']},\n {res}")
+
+        if _host['state'] == "closed" and "open" in res.values():
+            res = {key: value for key, value in res.items() if value == "open"}
+            res = {
+                key: ("🟩on" if value == "open" else "🟥off" if value ==
+                      "closed" else value)
+                for key, value in res.items()
+            }
+            res = yaml.dump(res, allow_unicode=True)
+            await utils.post_tg(_host['uid'], f"Error:{_host['Hosts']},\n {res}")
+
+
+def validate_url(url):
+    """
+    Validate if the given string is a valid URL.
+
+    :param url: The URL to validate.
+    :type url: str
+    :return: True if the URL is valid, False otherwise.
+    :rtype: bool
+    """
+    regex = re.compile(
+        r'^(?:http|ftp)s?://'  # http:// or https://
+        # domain...
+        r'(?:(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+(?:[A-Z]{2,6}\.?|[A-Z0-9-]{2,}\.?)|'
+        r'localhost|'  # localhost...
+        r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})'  # ...or ip
+        r'(?::\d+)?'  # optional port
+        r'(?:/?|[/?]\S+)$', re.IGNORECASE)
+    return bool(re.match(regex, url))
+
+
+def validate_host_ports(url):
+    """
+    Validate if the given string is a valid host format.
+
+    :param url: The host to validate.
+    :type url: str
+    :return: True if the host is valid, False otherwise.
+    :rtype: bool
+    """
+    regex = re.compile(
+        # domain...
+        r'(?:(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+(?:[A-Z]{2,6}\.?|[A-Z0-9-]{2,}\.?)|'
+        r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})'  # ...or ip
+        r' (?:\d+(?:-\d+)?(?:,\d+(?:-\d+)?)*)'  # ports
+        r' (?:open|closed|filtered)$', re.IGNORECASE)
+    return bool(re.match(regex, url))
+
+
+def validate_host(url):
+    """
+    Validate if the given string is a valid host format.
+
+    :param url: The host to validate.
+    :type url: str
+    :return: True if the host is valid, False otherwise.
+    :rtype: bool
+    """
+    regex = re.compile(
+        # domain...
+        r'(?:(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+(?:[A-Z]{2,6}\.?|[A-Z0-9-]{2,}\.?)|'
+        r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})'  # ...or ip
+        r' (?:open|closed|filtered)$', re.IGNORECASE)
+    return bool(re.match(regex, url))
+
+
+def whois_name(host_name):
+    """
+    Retrieve WHOIS information for a given host name.
+
+    :param host_name: The host name to query WHOIS information for.
+    :type host_name: str
+    :return: WHOIS information formatted as key-value pairs.
+    :rtype: str
+    """
+    w = whois.whois(host_name)
+    return '\n'.join(f"{i}: {w[i]}" for i in w)
+
+
+def whois_host(data):
+    """
+    Retrieve WHOIS information for a given host name.
+
+    :param data: The host name to query WHOIS information for.
+    :type data: str
+    :return: WHOIS information formatted as key-value pairs, or None if the information could not be retrieved.
+    :rtype: tuple[str, None]
+    """
+    return whois_name(data), None
+
+
+def api_show(uid):
+    """
+    Generate API key information for a given user ID.
+
+    :param uid: User ID.
+    :type uid: int or str
+    :return: API key information including usage instructions.
+    :rtype: str
+    """
+    api_hash = utils.gethashbyuid(uid)
+    return f'''API_KEY: {api_hash}
+This key allows you to send custom messages to the telegram bot.
+How to use it: 👇
+curl {os.environ.get("TELEGRAM_WEBHOOK_URL")}/tg \
+ -H "Content-Type: application/json" -d '{{"hash":"XXX","text":"Alert!!"}}'
+'''
+
+
+def scan_host(host_data):
+    """
+    Scan ports of a given host.
+
+    :param host_data: Host information including name and ports (e.g., example.com 22,80,443,8000-8010 open).
+    :type host_data: str
+    :return: Port scan result and None.
+    :rtype: tuple[dict, None]
+    """
+    hosts = host_data.split(" ")
+    if len(hosts) > 1:
+        res = nmap_host(hosts[0], hosts[1])
+    else:
+        res = nmap_host(hosts[0])
+    res = {key: ("🟩on" if value == "open" else "🟥off" if value ==
+                 "closed" else value) for key, value in res.items()}
+    res = yaml.dump(res, allow_unicode=True)
+
+    return res, None
+
+
+def nmap_host(ip, ports="22,80,443,8000,8080,3128,3306"):
+    """
+    Perform a simple port scan using nmap.
+
+    :param ip: Hostname or IP address to scan.
+    :type ip: str
+    :param ports: Comma-separated list of ports or port ranges to scan, default is "22,80,443,8000,8080,3128,3306".
+    :type ports: str, optional
+    :return: Dictionary containing port status (Open, Closed, Error) for each port scanned.
+    :rtype: dict
+    """
+    port_list = []
+    port_ranges = ports.split(',')
+
+    for port_range in port_ranges:
+        if '-' in port_range:
+            start, end = map(int, port_range.split('-'))
+            port_list.extend(range(start, end + 1))
+        else:
+            port_list.append(int(port_range))
+
+    port_status = {}
+
+    for port in port_list:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(1)  # Timeout for each connection attempt
+
+        try:
+            result = sock.connect_ex((ip, port))
+            if result == 0:
+                port_status[port] = "open"
+            else:
+                port_status[port] = "closed"
+        except socket.error as err:
+            port_status[port] = f"Error: {err}"
+        finally:
+            sock.close()
+
+    return port_status

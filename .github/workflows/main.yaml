@@ -1,0 +1,59 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  linting:
+    if: github.ref != 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 312
+        uses: actions/setup-python@v3
+        with:
+          python-version: 3.12
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pylint pycodestyle
+          pip install -r requirements.txt
+      - name: Analysing the code with pylint
+        run: |
+          cp src/calls/button_func.py.example src/calls/button_func.py
+          pylint $(git ls-files '*.py' '*.py.example')
+          pycodestyle --count --max-line-length=120 $(git ls-files '*.py' '*.py.example')
+
+  release:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: "read"
+      id-token: "write"
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Copy files
+        run: |
+          cp src/calls/button_func.py.example src/calls/button_func.py
+
+      - id: "auth"
+        name: Register gcloud
+        uses: "google-github-actions/auth@v2"
+        with:
+          workload_identity_provider: ${{ secrets.PROVIDER }}
+          service_account: ${{ secrets.SERVICE_ACCOUNT }}
+
+      - id: "deploy"
+        name: Deploying
+        uses: "google-github-actions/deploy-appengine@v2"
+        with:
+          env_vars: |-
+            TELEGRAM_TOKEN=${{ secrets.TELEGRAM_TOKEN }}
+            TELEGRAM_WEBHOOK_URL=${{ secrets.TELEGRAM_WEBHOOK_URL }}
+
+      - id: "test"
+        name: Testing release
+        run: 'curl "${{ steps.deploy.outputs.version_url }}"'

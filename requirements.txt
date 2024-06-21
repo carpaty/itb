@@ -1,0 +1,10 @@
+gunicorn
+uvicorn
+python-telegram-bot
+fastapi
+backoff
+pyyaml
+python-whois
+google-cloud-datastore
+pydantic
+portscan
