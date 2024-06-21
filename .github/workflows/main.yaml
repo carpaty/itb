@@ -38,6 +38,7 @@ jobs:
       - name: Copy files
         run: |
           cp src/calls/button_func.py.example src/calls/button_func.py
+          cp app.yaml.example app.yaml
 
       - id: "auth"
         name: Register gcloud
