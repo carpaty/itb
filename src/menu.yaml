@@ -1,0 +1,94 @@
+💻 Monitoring:
+  🕸 Sites:
+    - name: Add site
+      call: site_add
+      desc: |
+        If you want to add your site
+        into monitoring. Please type it
+        in a command bar 👇.
+        Example: https://example.com
+    - name: Del site
+      call: site_del
+      desc: |
+        If you want to remove your site
+        from monitoring. Please type it
+        in a command bar 👇.
+        Example: https://example.com
+    - name: List sites
+      call: site_list
+    - name: Site info
+      call: site_info
+      desc: |
+        If you want to see all info
+        about your site. Please type it
+        in a command bar👇.
+        Example: https://exapmle.com
+  🖥 Hosts:
+    - name: Add host
+      desc: |
+        If you want to add your host
+        into monitoring. Please type it
+        in a command bar 👇.
+        Example: example.com 80,443,53,20-22 open
+        80,443 means TCP ports
+        There are three states open|closed
+      call: host_add
+    - name: Del host
+      call: host_del
+      desc: |
+        If you want to remove your host
+        from monitoring. Please type it
+        in a command bar 👇.
+        Example: example.com open|closed
+        You can find all your hosts in
+        Monitoring->Hosts->List Hosts
+    - name: List hosts
+      call: host_list
+    - name: Host Info
+      desc: |
+        If you want to see all info
+        about your host. Please type it
+        in a command bar👇.
+        Example: exapmle.com
+      call: host_info
+  🚢 K8S:
+    Less:
+      - name: Add k8s
+        desc: FOOOO31
+        call: k_0
+      - name: List k8s
+        desc: FOOOO32
+        call: k_1
+      - name: k8s info
+        desc: FOOOO33
+        call: k_2
+  🔑 API:
+    - name: Show key
+      call: api_show
+
+⚛ DNS:
+    - name: Add DNS
+      desc: FOOOO42
+      call: d_1
+    - name: List DNS
+      desc: FOOOO43
+      call: d_2
+    - name: DNS info
+      desc: FOOOO44
+      call: d_3
+
+🔧 Utils:
+  📡 Scan:
+    - name: Scan host
+      desc: |
+        If you want to scan your site
+        Please type it in a command bar 👇.
+        Example: example.com or example.com 21-23,80,443,53
+      call: scan_host
+  🔍 Whois:
+    - name: Check host
+      desc: |
+        If you want to get info about your site
+        Please type it in a command bar 👇.
+        Example: example.com
+      call: whois_host

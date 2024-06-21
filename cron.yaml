@@ -1,0 +1,4 @@
+cron:
+- description: "worker job"
+  url: /cron
+  schedule: every 10 mins
