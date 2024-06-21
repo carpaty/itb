@@ -51,6 +51,7 @@ jobs:
         name: Deploying
         uses: "google-github-actions/deploy-appengine@v2"
         with:
+          project_id: infratrix
           env_vars: |-
             TELEGRAM_TOKEN=${{ secrets.TELEGRAM_TOKEN }}
             TELEGRAM_WEBHOOK_URL=${{ secrets.TELEGRAM_WEBHOOK_URL }}
