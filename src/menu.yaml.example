@@ -52,7 +52,7 @@
         Example: exapmle.com
       call: host_info
   🚢 K8S:
-    Less:
+    🛟 Less:
       - name: Add k8s
         desc: FOOOO31
         call: k_0
@@ -65,18 +65,16 @@
   🔑 API:
     - name: Show key
       call: api_show
-
 ⚛ DNS:
-    - name: Add DNS
-      desc: FOOOO41
-      call: d_1
-    - name: List DNS
-      desc: FOOOO42
-      call: d_2
-    - name: DNS info
-      desc: FOOOO43
-      call: d_3
-
+  - name: Add DNS
+    desc: FOOOO41
+    call: d_1
+  - name: List DNS
+    desc: FOOOO42
+    call: d_2
+  - name: DNS info
+    desc: FOOOO43
+    call: d_3
 🔧 Utils:
   📡 Scan:
     - name: Scan host

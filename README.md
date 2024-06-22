@@ -21,6 +21,7 @@ Clone the Repository:
 git clone https://github.com/carpaty/itb.git
 cd itb
 cp app.yaml.example app.yaml
+cp src/menu.yaml.example src/menu.yaml
 cp src/calls/button_func.py.example src/calls/button_func.py
 ```
 

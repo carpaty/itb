@@ -23,6 +23,7 @@ jobs:
       - name: Analysing the code with pylint
         run: |
           cp src/calls/button_func.py.example src/calls/button_func.py
+          cp src/menu.yaml.example src/menu.yaml
           pylint $(git ls-files '*.py' '*.py.example')
           pycodestyle --count --max-line-length=120 $(git ls-files '*.py' '*.py.example')
 
@@ -38,6 +39,7 @@ jobs:
       - name: Copy files
         run: |
           cp src/calls/button_func.py.example src/calls/button_func.py
+          cp src/menu.yaml.example src/menu.yaml
           cp app.yaml.example app.yaml
 
       - id: "auth"
