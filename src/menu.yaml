@@ -68,13 +68,13 @@
 
 ⚛ DNS:
     - name: Add DNS
-      desc: FOOOO42
+      desc: FOOOO41
       call: d_1
     - name: List DNS
-      desc: FOOOO43
+      desc: FOOOO42
       call: d_2
     - name: DNS info
-      desc: FOOOO44
+      desc: FOOOO43
       call: d_3
 
 🔧 Utils:
