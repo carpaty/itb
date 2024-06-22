@@ -111,15 +111,14 @@ def find_desc(val, dictionary, desc=''):
     :yield: Description
     :rtype: generator
     """
-    for v in dictionary.values():
+    for _, v in dictionary.items():
         if v == val:
             yield v
         elif isinstance(v, dict):
             yield from find_desc(val, v, desc)
         elif isinstance(v, list):
             for d in v:
-                yield from find_desc(val, d, desc)
-                if desc in d:
+                for _ in find_desc(val, d, desc):
                     yield d[desc]
 
 
