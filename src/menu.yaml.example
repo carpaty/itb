@@ -4,15 +4,15 @@
       call: site_add
       desc: |
         If you want to add your site
-        into monitoring. Please type it
-        in a command bar 👇.
+        to monitoring, please type it
+        in the command bar 👇.
         Example: https://example.com
     - name: Del site
       call: site_del
       desc: |
         If you want to remove your site
-        from monitoring. Please type it
-        in a command bar 👇.
+        from monitoring, please type it
+        in the command bar 👇.
         Example: https://example.com
     - name: List sites
       call: site_list
@@ -20,15 +20,15 @@
       call: site_info
       desc: |
         If you want to see all info
-        about your site. Please type it
-        in a command bar👇.
+        about your site, please type it
+        in the command bar👇.
         Example: https://exapmle.com
   🖥 Hosts:
     - name: Add host
       desc: |
         If you want to add your host
-        into monitoring. Please type it
-        in a command bar 👇.
+        to monitoring, please type it
+        in the command bar 👇.
         Example: example.com 80,443,53,20-22 open
         80,443 means TCP ports
         There are three states open|closed
@@ -37,8 +37,8 @@
       call: host_del
       desc: |
         If you want to remove your host
-        from monitoring. Please type it
-        in a command bar 👇.
+        from monitoring, please type it
+        in the command bar 👇.
         Example: example.com open|closed
         You can find all your hosts in
         Monitoring->Hosts->List Hosts
@@ -47,8 +47,8 @@
     - name: Host Info
       desc: |
         If you want to see all info
-        about your host. Please type it
-        in a command bar👇.
+        about your host, please type it
+        in the command bar👇.
         Example: exapmle.com
       call: host_info
   🚢 K8S:
@@ -81,14 +81,14 @@
   📡 Scan:
     - name: Scan host
       desc: |
-        If you want to scan your site
-        Please type it in a command bar 👇.
+        If you want to scan your site,
+        please type it in the command bar 👇.
         Example: example.com or example.com 21-23,80,443,53
       call: scan_host
   🔍 Whois:
     - name: Check host
       desc: |
-        If you want to get info about your site
-        Please type it in a command bar 👇.
+        If you want to get info about your site,
+        please type it in the command bar 👇.
         Example: example.com
       call: whois_host
