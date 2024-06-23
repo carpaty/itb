@@ -49,7 +49,8 @@
         If you want to see all info
         about your host, please type it
         in the command bar👇.
-        Example: exapmle.com
+        Example: exapmle.com open
+                 example.com closed
       call: host_info
   🚢 K8S:
     🛟 Less:
