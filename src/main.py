@@ -165,7 +165,7 @@ class Items(BaseModel):
     :param text: The optional text message.
     :type text: str | None
     """
-    hash: str
+    api_key: str
     text: str | None = None
 
 
@@ -179,7 +179,7 @@ async def tg_post(items: Items):
     :return: A message indicating the result.
     :rtype: dict
     """
-    post_hash = items.hash
+    post_hash = items.api_key
     post_text = items.text
     await utils.post_tg(utils.getuidbyhash(post_hash), post_text)
     return {'message': "message sent"}
@@ -195,7 +195,7 @@ async def tg_get():
     """
     return {'message': f'''ERROR, please use POST request
         curl {os.environ.get('TELEGRAM_WEBHOOK_URL')}/tg \
-             -H "Content-Type: application/json" -d '{{"hash":"XXX","text":"Alert!!"}}'
+             -H "Content-Type: application/json" -d '{{"api_key":"XXX","text":"Alert!!"}}'
         '''}
 
 
