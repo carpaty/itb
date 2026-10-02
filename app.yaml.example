@@ -1,7 +1,9 @@
 runtime: python312
 instance_class: F1
-entrypoint: gunicorn -b :$PORT -k uvicorn.workers.UvicornWorker --chdir src main:app
+entrypoint: gunicorn -b :$PORT -k uvicorn_worker.UvicornWorker --chdir src main:app
 env: standard
 env_variables:
   TELEGRAM_TOKEN: <TELEGRAM_TOKEN>
   TELEGRAM_WEBHOOK_URL: <TELEGRAM_WEBHOOK_URL>
+  # Optional: defaults to a value derived from TELEGRAM_TOKEN
+  # TELEGRAM_WEBHOOK_SECRET: <TELEGRAM_WEBHOOK_SECRET>
