@@ -26,12 +26,13 @@
 Main Module
 """
 
+import hmac
 import os
 from contextlib import asynccontextmanager
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import backoff
 import telegram
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from starlette.responses import Response, PlainTextResponse
 from telegram import Update
 from telegram.ext import (
@@ -62,10 +63,13 @@ async def set_webhook():
 
     :raises: `telegram.error.RetryAfter`
     """
-    if TELEGRAM_WEBHOOK_URL != "None":
+    if TELEGRAM_WEBHOOK_URL and TELEGRAM_WEBHOOK_URL != "None":
         utils.logger.info(
             "Setting webhook by URL %s/webhook...", TELEGRAM_WEBHOOK_URL)
-        await app_.bot.set_webhook(url=f"{TELEGRAM_WEBHOOK_URL}/webhook")
+        await app_.bot.set_webhook(
+            url=f"{TELEGRAM_WEBHOOK_URL}/webhook",
+            secret_token=utils.WEBHOOK_SECRET,
+            allowed_updates=Update.ALL_TYPES)
         utils.logger.info("Webhook set!")
     else:
         utils.logger.info("Webhook URL is None, skipping...")
@@ -93,12 +97,12 @@ async def lifespan(apps: FastAPI):  # pylint: disable=unused-argument
         await app_.shutdown()
 
 
-app_ = Application.builder().token(utils.KEY).build()
+app_ = Application.builder().bot(utils.BOT).build()
 app_.add_handler(CommandHandler("start", commands.start))
 app_.add_handler(CommandHandler("help", commands.help_command))
 app_.add_handler(InlineQueryHandler(inlinequery.inlinequery))
 app_.add_handler(MessageHandler(filters.Regex(
-    utils.EMOJI_PATTERN), commands.keyboard))
+    utils.menu_pattern()), commands.keyboard))
 app_.add_handler(MessageHandler(
     filters.TEXT & ~filters.COMMAND, commands.echocall))
 app_.add_error_handler(commands.error_handler)
@@ -106,9 +110,9 @@ app_.add_error_handler(commands.error_handler)
 # This is your custom calls located in calls directory
 # file name is button_func.py
 app_.add_handler(CallbackQueryHandler(button, pattern=utils.call_pattern()))
-app_.add_handler(CallbackQueryHandler(button_int, pattern="^inftrx"))
+app_.add_handler(CallbackQueryHandler(button_int, pattern="^inftrx_"))
 
-app = FastAPI(lifespan=lifespan)
+app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 
 
 @app.post("/webhook")
@@ -121,9 +125,14 @@ async def telegram_webhook(request: Request) -> Response:
     :return: An empty response.
     :rtype: Response
     """
-    await app_.update_queue.put(
-        Update.de_json(data=await request.json(), bot=app_.bot)
-    )
+    token = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+    if not hmac.compare_digest(token.encode(), utils.WEBHOOK_SECRET.encode()):
+        return Response(status_code=403)
+    try:
+        update = Update.de_json(data=await request.json(), bot=app_.bot)
+    except (ValueError, TypeError, KeyError):
+        return Response(status_code=400)
+    await app_.update_queue.put(update)
     return Response()
 
 
@@ -160,13 +169,13 @@ class Items(BaseModel):
     """
     Data model for items in POST requests.
 
-    :param hash: The hash identifier.
-    :type hash: str
-    :param text: The optional text message.
-    :type text: str | None
+    :param api_key: The API key shown by the bot.
+    :type api_key: str
+    :param text: The text message.
+    :type text: str
     """
-    api_key: str
-    text: str | None = None
+    api_key: str = Field(pattern=r"^[0-9a-f]{32}$")
+    text: str = Field(min_length=1, max_length=4096)
 
 
 @app.post('/tg')
@@ -174,14 +183,20 @@ async def tg_post(items: Items):
     """
     Send messages via the Telegram bot.
 
-    :param items: The JSON items containing the hash and text.
+    :param items: The JSON items containing the API key and text.
     :type items: Items
+    :raises HTTPException: 403 for an unknown API key, 502 if Telegram rejects the message
     :return: A message indicating the result.
     :rtype: dict
     """
-    post_hash = items.api_key
-    post_text = items.text
-    await utils.post_tg(utils.getuidbyhash(post_hash), post_text)
+    uid = utils.getuidbyhash(items.api_key)
+    if uid is None:
+        raise HTTPException(status_code=403, detail="invalid api_key")
+    try:
+        await utils.post_tg(uid, items.text)
+    except telegram.error.TelegramError as err:
+        utils.logger.warning("Message to %s failed: %s", uid, err)
+        raise HTTPException(status_code=502, detail="message could not be delivered") from err
     return {'message': "message sent"}
 
 
@@ -200,13 +215,21 @@ async def tg_get():
 
 
 @app.get('/cron')
-async def cron():
+async def cron(request: Request):
     """
     Cron route for triggering periodic tasks.
 
+    App Engine strips ``X-Appengine-Cron`` from external requests, so its
+    presence proves the call comes from the App Engine cron service.
+
+    :param request: The incoming request.
+    :type request: Request
+    :raises HTTPException: 403 if the request does not come from App Engine cron
     :return: A message indicating the result.
     :rtype: dict
     """
+    if request.headers.get("X-Appengine-Cron") != "true":
+        raise HTTPException(status_code=403, detail="forbidden")
     await worker()
     return {'message': "message sent"}
 

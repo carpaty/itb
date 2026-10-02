@@ -31,11 +31,18 @@ from telegram import (
     InlineKeyboardButton)
 
 from utils import (
+    BACK_BUTTON,
     find_key,
     find,
     cfg,
     update_state,
     check_state)
+
+ROW_SIZE = 2
+
+
+def _rows(buttons, size=ROW_SIZE):
+    return [buttons[i:i + size] for i in range(0, len(buttons), size)]
 
 
 def gen_menu(uid, item=""):
@@ -44,47 +51,30 @@ def gen_menu(uid, item=""):
 
     This function generates a menu based on the user's current state and the provided item.
     It returns either a ReplyKeyboardMarkup or InlineKeyboardMarkup object, depending on the
-    structure of the menu configuration.
+    structure of the menu configuration. Unknown items fall back to the main menu.
 
     :param uid: User ID
     :type uid: int
     :param item: Name of the button, defaults to ""
     :type item: str, optional
-    :return: JSON representation of the keyboard markup
-    :rtype: str
+    :return: Keyboard markup
+    :rtype: telegram.ReplyKeyboardMarkup | telegram.InlineKeyboardMarkup
     """
     uid = str(uid)
-    if 'Back' in item:
-        cur_stat = check_state(uid)
-        try:
-            a = list(find_key(cfg, cur_stat['current']))
-        except KeyError:
-            a = ''
-        if any(a):
-            return gen_menu(uid, a[0])
-        return gen_menu(uid, "")
+    if item == BACK_BUTTON:
+        cur_stat = check_state(uid) or {}
+        parents = list(find_key(cfg, cur_stat.get('current')))
+        return gen_menu(uid, parents[0] if parents and parents[0] else "")
 
-    list_item_keyboard = []
-    list_item_inline = []
+    list_find = next(find(item, cfg), None) if item else cfg
+    if isinstance(list_find, list) and list_find:
+        return InlineKeyboardMarkup(
+            [[InlineKeyboardButton(v['name'], callback_data=v['call'])] for v in list_find])
+    if not isinstance(list_find, dict) or not list_find:
+        return gen_menu(uid, "") if item else ReplyKeyboardMarkup([[BACK_BUTTON]], resize_keyboard=True)
+
+    list_item_keyboard = list(list_find)
     if item:
-        list_find = {}
-        for i in find(item, cfg):
-            list_find = i
-        if isinstance(list_find, dict) and list_find:
-            for key, _ in list_find.items():
-                list_item_keyboard.append(key)
-            list_item_keyboard.append('\U00002B05 Back')
-            update_state(uid, item)
-        elif isinstance(list_find, list):
-            for v in list_find:
-                list_item_inline.append(InlineKeyboardButton(
-                    v['name'], callback_data=v['call']))
-    else:
-        for key, _ in cfg.items():
-            list_item_keyboard.append(key)
-    if list_item_keyboard:
-        ver = ReplyKeyboardMarkup([list_item_keyboard], resize_keyboard=True)
-        return ver.to_json()
-
-    ver = InlineKeyboardMarkup([list_item_inline])
-    return ver
+        list_item_keyboard.append(BACK_BUTTON)
+        update_state(uid, item)
+    return ReplyKeyboardMarkup(_rows(list_item_keyboard), resize_keyboard=True)

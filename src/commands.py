@@ -26,6 +26,7 @@
 Command handlers for the Telegram bot.
 """
 
+import inspect
 from telegram import Update
 from telegram.ext import ContextTypes
 import menu
@@ -99,10 +100,17 @@ async def echocall(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None: 
     if update.message and update.message.from_user and update.message.text:
         user_id = update.message.from_user.id
         message_text = update.message.text
-        utils.logger.info("User: %s typed: %s", user_id, message_text)
-        method_name = utils.check_button(user_id)
-        method_to_call = getattr(button_func, method_name['current'])
-        text, ver = method_to_call(message_text)
+        utils.logger.debug("User: %s typed: %s", user_id, message_text)
+        state = utils.check_button(user_id) or {}
+        method_name = state.get('current', '')
+        method_to_call = getattr(button_func, method_name, None) if method_name in utils.menu_calls() else None
+        if not callable(method_to_call):
+            await update.message.reply_text(text="Please choose an option from the menu first: /help")
+            return
+        result = method_to_call(user_id, message_text)
+        if inspect.isawaitable(result):
+            result = await result
+        text, ver = result
         await update.message.reply_text(text=text, reply_markup=ver, disable_web_page_preview=True)
 
 

@@ -22,7 +22,7 @@
         If you want to see all info
         about your site, please type it
         in the command bar👇.
-        Example: https://exapmle.com
+        Example: https://example.com
   🖥 Hosts:
     - name: Add host
       desc: |
@@ -30,8 +30,8 @@
         to monitoring, please type it
         in the command bar 👇.
         Example: example.com 80,443,53,20-22 open
-        80,443 means TCP ports
-        There are three states open|closed
+        80,443 means TCP ports (up to 100)
+        There are two states open|closed
       call: host_add
     - name: Del host
       call: host_del
@@ -49,7 +49,7 @@
         If you want to see all info
         about your host, please type it
         in the command bar👇.
-        Example: exapmle.com open
+        Example: example.com open
                  example.com closed
       call: host_info
   🚢 K8S:
@@ -66,6 +66,8 @@
   🔑 API:
     - name: Show key
       call: api_show
+    - name: Rotate key
+      call: api_rotate
 
 ⚛ DNS:
   - name: Add DNS
@@ -85,6 +87,7 @@
         If you want to scan your site,
         please type it in the command bar 👇.
         Example: example.com or example.com 21-23,80,443,53
+        Up to 100 ports per scan.
       call: scan_host
   🔍 Whois:
     - name: Check host
@@ -93,3 +96,11 @@
         please type it in the command bar 👇.
         Example: example.com
       call: whois_host
+  🔐 SSL:
+    - name: Check certificate
+      desc: |
+        If you want to check the SSL certificate
+        of your site, please type it
+        in the command bar 👇.
+        Example: example.com or example.com:8443
+      call: ssl_check

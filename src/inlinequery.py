@@ -48,12 +48,11 @@ async def inlinequery(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     :param context: The context object.
     :type context: telegram.ext.ContextTypes.DEFAULT_TYPE
     """
-    if update.inline_query is not None:
-        query = update.inline_query.query
-        logger.info("Inline query received: %s", query)
-    else:
-        logger.info("Missing query")
-        query = ""
+    if update.inline_query is None or not update.inline_query.query:
+        logger.debug("Missing query")
+        return
+    query = update.inline_query.query
+    logger.debug("Inline query received: %s", query)
 
     results = [
         InlineQueryResultArticle(
@@ -79,5 +78,4 @@ async def inlinequery(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
     ]
 
-    if update.inline_query is not None:
-        await update.inline_query.answer(results)
+    await update.inline_query.answer(results)
