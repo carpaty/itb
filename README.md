@@ -12,6 +12,17 @@ It leverages Webhook processes, allowing it to be hosted on Google's free AppEng
 * Simple and Intuitive: The bot is designed to be straightforward and user-friendly.
 * Webhook Integration: Utilizes Webhook processes for efficient communication.
 * Free Hosting: Can be hosted on Google's AppEngine at no cost.
+* Monitoring: site uptime and host port state checks every 10 minutes with Telegram alerts.
+* Tools: port scan, whois lookup and SSL certificate check (issuer, expiry, days left).
+* HTTP API: send yourself alerts with a personal API key, which can be rotated from the bot.
+
+#### Security
+
+* Webhook requests are verified with Telegram's secret token header. The secret is derived from
+  `TELEGRAM_TOKEN` unless `TELEGRAM_WEBHOOK_SECRET` is set.
+* `/cron` only accepts requests from App Engine cron (`X-Appengine-Cron` header).
+* Hosts and URLs typed by users are resolved first and rejected when they point to private,
+  loopback, link-local or metadata addresses. Scans are limited to 100 ports.
 
 #### Installation
 
@@ -30,6 +41,15 @@ Ensure you have Python installed, then run:
 
 ```bash
 pip install -r requirements.txt
+```
+
+For development (lint and tests):
+
+```bash
+pip install -r requirements-dev.txt
+pylint $(git ls-files '*.py' '*.py.example')
+pycodestyle --count --max-line-length=120 $(git ls-files '*.py' '*.py.example')
+pytest
 ```
 
 Set Up Your Bot:  
@@ -65,7 +85,8 @@ gcloud app deploy cron.yaml
 #### Usage
 
 Once deployed, the bot will listen to incoming messages and respond based on the defined handlers.  
-You can customize the bot's behavior by modifying the handlers in the main.py file.  
+You can customize the bot's behavior by editing `src/menu.yaml` and the tools in
+`src/calls/button_func.py` (see [AGENTS.md](AGENTS.md) for how to add a tool).  
 
 #### Conclusion
 
