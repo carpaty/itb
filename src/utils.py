@@ -23,15 +23,18 @@
 # -*- coding: utf-8 -*-
 """ Util module """
 
+import hashlib
+import hmac
 import logging
-import uuid
-import re
 import os
+import re
+import secrets
+from pathlib import Path
 import yaml
 import telegram
 import db
 
-VERSION = "0.0.1"
+VERSION = "0.1.0"
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
                     level=logging.INFO, )
@@ -40,28 +43,44 @@ logger = logging.getLogger(__name__)
 
 cache = db.Cache()
 
-with open('menu.yaml', encoding="utf-8", mode="r") as f:
-    file = f.read()
-cfg = yaml.load(file, Loader=yaml.FullLoader)
+cfg = yaml.safe_load(Path(__file__).with_name('menu.yaml').read_text(encoding="utf-8"))
 
 KEY = os.environ.get('TELEGRAM_TOKEN', "XXX")
 
-EMOJI_PATTERN = re.compile(
-    "^["
-    "\U0001F1E0-\U0001F1FF"  # flags (iOS)
-    "\U0001F300-\U0001F5FF"  # symbols & pictographs
-    "\U0001F600-\U0001F64F"  # emoticons
-    "\U0001F680-\U0001F6FF"  # transport & map symbols
-    "\U0001F700-\U0001F77F"  # alchemical symbols
-    "\U0001F780-\U0001F7FF"  # Geometric Shapes Extended
-    "\U0001F800-\U0001F8FF"  # Supplemental Arrows-C
-    "\U0001F900-\U0001F9FF"  # Supplemental Symbols and Pictographs
-    "\U0001FA00-\U0001FA6F"  # Chess Symbols
-    "\U0001FA70-\U0001FAFF"  # Symbols and Pictographs Extended-A
-    "\U00002702-\U000027B0"  # Dingbats
-    "\U000024C2-\U0001F251"
-    "]+"
-)
+# Telegram only accepts [A-Za-z0-9_-]{1,256}; derive a stable value from the
+# token so every instance agrees on it without extra configuration.
+WEBHOOK_SECRET = os.environ.get('TELEGRAM_WEBHOOK_SECRET') or hmac.new(
+    KEY.encode(), b"itb-webhook-secret", hashlib.sha256).hexdigest()
+
+BOT = telegram.Bot(token=KEY)
+
+BACK_BUTTON = '\U00002B05 Back'
+
+
+def menu_keys(d):
+    """
+    Find all menu button labels in the menu configuration.
+
+    :param d: Menu configuration
+    :type d: dict
+    :yield: Button label
+    :rtype: generator
+    """
+    for k, v in d.items():
+        yield k
+        if isinstance(v, dict):
+            yield from menu_keys(v)
+
+
+def menu_pattern():
+    """
+    Build a regex matching exactly the reply keyboard buttons.
+
+    :return: Regex pattern
+    :rtype: re.Pattern
+    """
+    labels = [*menu_keys(cfg), BACK_BUTTON]
+    return re.compile(f"^(?:{'|'.join(map(re.escape, labels))})$")
 
 
 async def post_tg(uid, tg_text) -> None:
@@ -73,9 +92,8 @@ async def post_tg(uid, tg_text) -> None:
     :param tg_text: Text message to be sent
     :type tg_text: str
     """
-    bot = telegram.Bot(token=KEY)
-    logger.info("Message '%s' sent to %s", tg_text, uid)
-    await bot.send_message(chat_id=uid, text=tg_text)
+    await BOT.send_message(chat_id=uid, text=tg_text)
+    logger.info("Message sent to %s", uid)
 
 
 def find_key(d, target_key, parent_key=None):
@@ -119,7 +137,8 @@ def find_desc(val, dictionary, desc=''):
         elif isinstance(v, list):
             for d in v:
                 for _ in find_desc(val, d, desc):
-                    yield d[desc]
+                    if desc in d:
+                        yield d[desc]
 
 
 def find(key, dictionary):
@@ -193,6 +212,42 @@ def update_button(uid, state):
     cache.qinsert(f"button_{uid}", state)
 
 
+def check_pending(uid):
+    """
+    Get the action waiting for a Yes/No confirmation.
+
+    :param uid: User ID
+    :type uid: int
+    :return: Pending action and its data
+    :rtype: dict
+    """
+    return cache.qselect(f"pending_{uid}")
+
+
+def update_pending(uid, action, data):
+    """
+    Store an action waiting for a Yes/No confirmation.
+
+    :param uid: User ID
+    :type uid: int
+    :param action: Action name
+    :type action: str
+    :param data: User input the action applies to
+    :type data: str
+    """
+    cache.qinsert(f"pending_{uid}", {'action': action, 'data': data})
+
+
+def clear_pending(uid):
+    """
+    Drop the pending confirmation of a user.
+
+    :param uid: User ID
+    :type uid: int
+    """
+    cache.qdelete(f"pending_{uid}")
+
+
 def find_all_call(d, tag):
     """
     Find all calls from the data.
@@ -215,6 +270,16 @@ def find_all_call(d, tag):
                     yield item[tag]
 
 
+def menu_calls():
+    """
+    Get the names of all calls declared in menu.yaml.
+
+    :return: Call names
+    :rtype: set[str]
+    """
+    return set(find_all_call(cfg, 'call'))
+
+
 def call_pattern():
     """
     Get all call functions from menu.yaml.
@@ -222,7 +287,7 @@ def call_pattern():
     :return: Regex pattern
     :rtype: str
     """
-    return re.compile(f"^({'|'.join(find_all_call(cfg, 'call'))})$")
+    return re.compile(f"^({'|'.join(map(re.escape, sorted(menu_calls())))})$")
 
 
 def user_check(uid):
@@ -245,9 +310,24 @@ def user_insert(uid):
 
     :param uid: User ID
     :type uid: int
+    :return: New API key
+    :rtype: str
     """
-    sql = db.Sql()
-    sql.qinsert(uid, uuid.uuid4().hex)
+    return rotate_key(uid)
+
+
+def rotate_key(uid):
+    """
+    Generate a new API key for a user, invalidating the previous one.
+
+    :param uid: User ID
+    :type uid: int
+    :return: New API key
+    :rtype: str
+    """
+    api_key = secrets.token_hex(16)
+    db.Sql().qinsert(uid, api_key)
+    return api_key
 
 
 def getuidbyhash(user_hash):
@@ -256,12 +336,12 @@ def getuidbyhash(user_hash):
 
     :param user_hash: User hash (UUID)
     :type user_hash: str
-    :return: User ID
-    :rtype: int
+    :return: User ID, or None if the hash is unknown
+    :rtype: int | None
     """
     sql = db.Sql()
     res = list(sql.qselect_hash(user_hash))
-    return res[0].id
+    return res[0].key.id_or_name if res else None
 
 
 def gethashbyuid(uid):

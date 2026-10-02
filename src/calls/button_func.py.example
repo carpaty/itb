@@ -22,30 +22,50 @@
 
 # -*- coding: utf-8 -*-
 
-""" Custom calls """
+"""
+Custom calls
 
-import re
-import sys
+Every ``call`` from menu.yaml that expects typed input is a function here with
+the signature ``(uid, data) -> (text, reply_markup)``; it may be async.
+Actions that need a Yes/No confirmation keep the user input server side
+(``utils.update_pending``) because Telegram limits callback data to 64 bytes
+and callback data must not be trusted.
+"""
+
+import asyncio
+import inspect
 import os
-import socket
-from urllib import request, error
+import re
+import ssl
 import time
 from datetime import datetime, timezone
+from urllib.parse import urlsplit
 import whois
 import yaml
 from google.cloud import datastore
 from google.cloud.datastore.query import PropertyFilter
 
+import telegram
 from telegram import InlineKeyboardMarkup, InlineKeyboardButton, Update
 from telegram.ext import ContextTypes
+import db
+import netutils
 import utils
+
+MAX_ITEMS_PER_USER = 20
+MAX_URL_LENGTH = 500
+MESSAGE_LIMIT = 4000
+SITE_CHECK_ATTEMPTS = 3
+SSL_WARNING_DAYS = 14
+WORKER_CONCURRENCY = 10
+DEFAULT_SCAN_PORTS = "22,80,443,8000,8080,3128,3306"
 
 
 class Sql:
     """Custom DB"""
 
     def __init__(self):
-        self.client = datastore.Client()
+        self.client = db.get_client()
 
     def qselectall(self, kind, uid):
         """
@@ -123,6 +143,7 @@ class Sql:
         entity = self.client.get(task_key)
         return entity
 
+    # pylint: disable-next=too-many-arguments,too-many-positional-arguments
     def qinsert_host(self, kind, uid, data, port, state):
         """
         Insert a new host entity.
@@ -176,9 +197,58 @@ class Sql:
         :param data: The data associated with the entity.
         :type data: str
         """
-        task_key = self.client.key(kind, f"{uid}_{data}")
-        task = datastore.Entity(key=task_key)
-        self.client.delete(task)
+        self.client.delete(self.client.key(kind, f"{uid}_{data}"))
+
+
+def truncate(text, limit=MESSAGE_LIMIT):
+    """
+    Keep a message below the Telegram message size limit.
+
+    :param text: Message text
+    :type text: str
+    :param limit: Maximum length
+    :type limit: int
+    :return: Possibly shortened text
+    :rtype: str
+    """
+    return text if len(text) <= limit else f"{text[:limit]}\n…"
+
+
+def format_ports(res):
+    """
+    Render port states with status icons.
+
+    :param res: Mapping of port to state
+    :type res: dict
+    :return: YAML formatted text
+    :rtype: str
+    """
+    res = {key: ("🟩on" if value == "open" else "🟥off" if value == "closed" else value)
+           for key, value in res.items()}
+    return yaml.dump(res, allow_unicode=True)
+
+
+def confirm(uid, action, data, text):
+    """
+    Ask the user to confirm an action with Yes/No buttons.
+
+    :param uid: User ID.
+    :type uid: int or str
+    :param action: Key of CONFIRM_ACTIONS.
+    :type action: str
+    :param data: User input the action applies to.
+    :type data: str
+    :param text: Question shown to the user.
+    :type text: str
+    :return: Question text and inline keyboard markup.
+    :rtype: tuple[str, InlineKeyboardMarkup]
+    """
+    utils.update_pending(uid, action, data)
+    ver = InlineKeyboardMarkup([[
+        InlineKeyboardButton("Yes", callback_data=f"inftrx_{action}_yes"),
+        InlineKeyboardButton("No", callback_data=f"inftrx_{action}_no"),
+    ]])
+    return text, ver
 
 
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:  # pylint: disable=unused-argument
@@ -192,34 +262,32 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:  #
     """
     query = update.callback_query
     query_option = query.data
-    utils.logger.info("User: %s press button: %s",
-                      update.effective_user.id, query_option)
+    uid = update.effective_user.id
+    utils.logger.info("User: %s press button: %s", uid, query_option)
+    await query.answer()
+    ver = None
 
     if query_option == "site_list":
-        await query.answer()
-        res = '\n'.join(item['Sites']
-                        for item in site_list(update.effective_user.id))
-        await query.edit_message_text(text=f"{res}", disable_web_page_preview=True)
+        sites = [item['Sites'] for item in site_list(uid)]
+        text = '\n'.join(sites) or "You have no sites in monitoring."
     elif query_option == "host_list":
-        await query.answer()
-        host_i = (f"{item['Hosts']} {item['port']} {
-                  item['state']}" for item in host_list(update.effective_user.id))
-        res = '\n'.join(host_i)
-        await query.edit_message_text(text=f"{res}", disable_web_page_preview=True)
+        hosts = [f"{item['Hosts']} {item['port']} {item['state']}" for item in host_list(uid)]
+        text = '\n'.join(hosts) or "You have no hosts in monitoring."
     elif query_option == "api_show":
-        await query.answer()
-        res = api_show(update.effective_user.id)
-        await query.edit_message_text(text=f"{res}", disable_web_page_preview=True)
+        text = api_show(uid)
+    elif query_option == "api_rotate":
+        text, ver = confirm(uid, "apirotate", "",
+                            "Do you want to generate a new API key?\nThe current key will stop working.")
     else:
-        utils.update_button(update.effective_user.id, query_option)
-        query_text = list(utils.find_desc(query_option, utils.cfg, 'desc'))[0]
-        await query.answer()
-        await query.edit_message_text(text=f"{query_text}", disable_web_page_preview=True)
+        utils.update_button(uid, query_option)
+        text = next(utils.find_desc(query_option, utils.cfg, 'desc'),
+                    "Please type your input in the command bar 👇")
+    await query.edit_message_text(text=truncate(text), reply_markup=ver, disable_web_page_preview=True)
 
 
 async def button_int(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:  # pylint: disable=unused-argument
     """
-    Handle button presses that require calling a specific method.
+    Handle Yes/No confirmations created by :func:`confirm`.
 
     :param update: Incoming update.
     :type update: Update
@@ -227,134 +295,131 @@ async def button_int(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     :type context: ContextTypes.DEFAULT_TYPE
     """
     query = update.callback_query
-    utils.logger.info("User: %s press button_int: %s",
-                      update.effective_user.id, query.data)
-    query_option = query.data.split("_")
-    method_to_call = getattr(sys.modules[__name__], query_option[1])
-    res = method_to_call(update.effective_user.id,
-                         query_option[2], query_option[3])
-    await query.edit_message_text(text=f"{res}", disable_web_page_preview=True)
+    uid = update.effective_user.id
+    utils.logger.info("User: %s press button_int: %s", uid, query.data)
+    await query.answer()
+    _, action, cond = (query.data.split("_", 2) + ["", ""])[:3]
+    handler = CONFIRM_ACTIONS.get(action)
+    pending = utils.check_pending(uid)
+
+    if handler is None or not pending or pending.get('action') != action:
+        res = "This request has expired, please start again."
+    else:
+        utils.clear_pending(uid)
+        if cond == "yes":
+            res = handler(uid, pending.get('data', ''))
+            if inspect.isawaitable(res):
+                res = await res
+        else:
+            res = "Cancelled."
+    await query.edit_message_text(text=truncate(res), disable_web_page_preview=True)
 
 
-def site_add(data):
+def site_add(uid, data):
     """
     Add a site for monitoring.
 
+    :param uid: User ID.
+    :type uid: int or str
     :param data: URL of the site to add.
     :type data: str
     :return: Confirmation text and inline keyboard markup.
     :rtype: tuple[str, InlineKeyboardMarkup] or tuple[str, None]
     """
-    if validate_url(data):
-        text = f"Do you want to add this site: {data}\n into monitoring?"
-        list_item_inline = [
-            InlineKeyboardButton(
-                "Yes", callback_data=f"inftrx_siteadd_yes_{data}"),
-            InlineKeyboardButton(
-                "No", callback_data=f"inftrx_siteadd_no_{data}")
-        ]
-        ver = InlineKeyboardMarkup([list_item_inline])
-        return text, ver
-    return "Wrong URL, should start with http or https", None
+    data = data.strip()
+    if not validate_url(data):
+        return "Wrong URL, should start with http or https", None
+    if len(site_list_db(uid)) >= MAX_ITEMS_PER_USER:
+        return f"You can monitor up to {MAX_ITEMS_PER_USER} sites.", None
+    return confirm(uid, "siteadd", data, f"Do you want to add this site: {data}\n into monitoring?")
 
 
-def siteadd(uid, cond, data):
+def siteadd(uid, data):
     """
-    Process the addition of a site based on user confirmation.
+    Add a confirmed site.
 
     :param uid: User ID.
     :type uid: int or str
-    :param cond: User confirmation ('yes' or 'no').
-    :type cond: str
     :param data: URL of the site to add.
     :type data: str
     :return: Success or error message.
     :rtype: str
     """
-    if cond == "yes":
-        if site_add_db(uid, data):
-            return f"Site: {data} has been added into monitoring"
-        return "[Error: E001] Something went wrong."
-    return "Please select option."
+    if site_add_db(uid, data):
+        return f"Site: {data} has been added into monitoring"
+    return "[Error: E001] Something went wrong."
 
 
-def site_del(data):
+def site_del(uid, data):
     """
     Delete a site from monitoring.
 
+    :param uid: User ID.
+    :type uid: int or str
     :param data: URL of the site to delete.
     :type data: str
     :return: Confirmation text and inline keyboard markup.
-    :rtype: tuple[str, InlineKeyboardMarkup]
+    :rtype: tuple[str, InlineKeyboardMarkup] or tuple[str, None]
     """
-    text = f"Do you want to del this site: {data}\n from monitoring?"
-    list_item_inline = [
-        InlineKeyboardButton(
-            "Yes", callback_data=f"inftrx_sitedel_yes_{data}"),
-        InlineKeyboardButton("No", callback_data=f"inftrx_sitedel_no_{data}")
-    ]
-    ver = InlineKeyboardMarkup([list_item_inline])
-    return text, ver
+    data = data.strip()
+    if not validate_url(data):
+        return "Wrong URL, should start with http or https", None
+    return confirm(uid, "sitedel", data, f"Do you want to del this site: {data}\n from monitoring?")
 
 
-def sitedel(uid, cond, data):
+def sitedel(uid, data):
     """
-    Process the deletion of a site based on user confirmation.
+    Delete a confirmed site.
 
     :param uid: User ID.
     :type uid: int or str
-    :param cond: User confirmation ('yes' or 'no').
-    :type cond: str
     :param data: URL of the site to delete.
     :type data: str
     :return: Success or error message.
     :rtype: str
     """
-    if cond == "yes":
-        if site_del_db(uid, data):
-            return f"Site: {data} has been removed from monitoring"
-        return "[Error: E002] Something went wrong. Name does not exist"
-    return "Please select option."
+    if site_del_db(uid, data):
+        return f"Site: {data} has been removed from monitoring"
+    return "[Error: E002] Something went wrong. Name does not exist"
 
 
-def site_info(data):
+def site_info(uid, data):
     """
     Retrieve information about a site.
 
+    :param uid: User ID.
+    :type uid: int or str
     :param data: URL of the site to retrieve information for.
     :type data: str
     :return: Confirmation text and inline keyboard markup.
-    :rtype: tuple[str, InlineKeyboardMarkup]
+    :rtype: tuple[str, InlineKeyboardMarkup] or tuple[str, None]
     """
-    text = f"Do you want to see site: {data}\n info?"
-    list_item_inline = [
-        InlineKeyboardButton(
-            "Yes", callback_data=f"inftrx_siteinfo_yes_{data}"),
-        InlineKeyboardButton("No", callback_data=f"inftrx_siteinfo_no_{data}")
-    ]
-    ver = InlineKeyboardMarkup([list_item_inline])
-    return text, ver
+    data = data.strip()
+    if not validate_url(data):
+        return "Wrong URL, should start with http or https", None
+    return confirm(uid, "siteinfo", data, f"Do you want to see site: {data}\n info?")
 
 
-def siteinfo(uid, cond, data):
+async def siteinfo(uid, data):
     """
-    Process the retrieval of site information based on user confirmation.
+    Show when a site was added and check whether it is up right now.
 
     :param uid: User ID.
     :type uid: int or str
-    :param cond: User confirmation ('yes' or 'no').
-    :type cond: str
     :param data: URL of the site to retrieve information for.
     :type data: str
     :return: Success or error message with site information.
     :rtype: str
     """
-    if cond == "yes":
-        res = site_info_db(uid, data)
-        if res:
-            return f"Your site {data} has been added\n in {res['time'].strftime('%Y-%m-%d %H:%M:%S')}"
-        return "[Error: site info] Something went wrong."
-    return "Please select option."
+    res = site_info_db(uid, data)
+    if not res:
+        return "[Error: site info] Something went wrong. Name does not exist"
+    started = time.monotonic()
+    failure = await asyncio.to_thread(netutils.check_url, data)
+    elapsed = int((time.monotonic() - started) * 1000)
+    status = f"🟥 down: {failure}" if failure else f"🟩 up ({elapsed} ms)"
+    return (f"Your site {data} has been added\n in {res['time'].strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"Status: {status}")
 
 
 def site_list(uid):
@@ -393,10 +458,12 @@ def site_del_db(uid, data):
     :type uid: int or str
     :param data: URL of the site to delete from the database.
     :type data: str
-    :return: True if successful.
+    :return: True if the site existed and was deleted.
     :rtype: bool
     """
     sql = Sql()
+    if not sql.qselect("Sites", uid, data):
+        return False
     sql.qdelete("Sites", uid, data)
     return True
 
@@ -411,9 +478,7 @@ def site_list_db(uid):
     :rtype: list[dict]
     """
     sql = Sql()
-    res = sql.qselectall("Sites", uid)
-    utils.logger.info("Site: %s ", res)
-    return res
+    return sql.qselectall("Sites", uid)
 
 
 def site_info_db(uid, data):
@@ -428,135 +493,117 @@ def site_info_db(uid, data):
     :rtype: dict or None
     """
     sql = Sql()
-    res = sql.qselect("Sites", uid, data)
-    utils.logger.info("Site_info: %s ", res)
-    return res
+    return sql.qselect("Sites", uid, data)
 
 
-def host_add(data):
+def host_add(uid, data):
     """
     Add a host for monitoring.
 
+    :param uid: User ID.
+    :type uid: int or str
     :param data: Host information including name, ports, and state (e.g., example.com 80,443 open).
     :type data: str
     :return: Confirmation text and inline keyboard markup.
     :rtype: tuple[str, InlineKeyboardMarkup] or tuple[str, None]
     """
-    if validate_host_ports(data):
-        text = f"Do you want to add this host: {data}\n into monitoring?"
-        list_item_inline = [
-            InlineKeyboardButton(
-                "Yes", callback_data=f"inftrx_hostadd_yes_{data}"),
-            InlineKeyboardButton(
-                "No", callback_data=f"inftrx_hostadd_no_{data}")
-        ]
-        ver = InlineKeyboardMarkup([list_item_inline])
-        return text, ver
-    return "Wrong host, should be example.com 80,443 open", None
+    data = " ".join(data.split())
+    if not validate_host_ports(data):
+        return "Wrong host, should be example.com 80,443 open", None
+    try:
+        netutils.parse_ports(data.split(" ")[1])
+    except ValueError as err:
+        return f"Wrong ports: {err}", None
+    if len(host_list_db(uid)) >= MAX_ITEMS_PER_USER:
+        return f"You can monitor up to {MAX_ITEMS_PER_USER} hosts.", None
+    return confirm(uid, "hostadd", data, f"Do you want to add this host: {data}\n into monitoring?")
 
 
-def hostadd(uid, cond, host_data):
+def hostadd(uid, host_data):
     """
-    Process the addition of a host based on user confirmation.
+    Add a confirmed host.
 
     :param uid: User ID.
     :type uid: int or str
-    :param cond: User confirmation ('yes' or 'no').
-    :type cond: str
     :param host_data: Host information including name, ports, and state (e.g., example.com 80,443 open|closed).
     :type host_data: str
     :return: Success or error message.
     :rtype: str
     """
     host = host_data.split(" ")
-    if cond == "yes":
-        if host_add_db(uid, host[0], host[1], host[2]):
-            return f"Host: {host_data} has been added into monitoring"
-        return "[Error: E001] Something went wrong."
-    return "Please select option."
+    if host_add_db(uid, host[0], host[1], host[2]):
+        return f"Host: {host_data} has been added into monitoring"
+    return "[Error: E001] Something went wrong."
 
 
-def host_del(data):
+def host_del(uid, data):
     """
     Delete a host from monitoring.
 
+    :param uid: User ID.
+    :type uid: int or str
     :param data: Host information including name and state (e.g., example.com open|closed).
     :type data: str
     :return: Confirmation text and inline keyboard markup.
     :rtype: tuple[str, InlineKeyboardMarkup] or tuple[str, None]
     """
-    if validate_host(data):
-        text = f"Do you want to del this host: {data}\n from monitoring?"
-        list_item_inline = [
-            InlineKeyboardButton(
-                "Yes", callback_data=f"inftrx_hostdel_yes_{data}"),
-            InlineKeyboardButton(
-                "No", callback_data=f"inftrx_hostdel_no_{data}")
-        ]
-        ver = InlineKeyboardMarkup([list_item_inline])
-        return text, ver
-    return "Wrong host, should be example.com open|closed", None
+    data = " ".join(data.split())
+    if not validate_host(data):
+        return "Wrong host, should be example.com open|closed", None
+    return confirm(uid, "hostdel", data, f"Do you want to del this host: {data}\n from monitoring?")
 
 
-def hostdel(uid, cond, host_data):
+def hostdel(uid, host_data):
     """
-    Process the deletion of a host based on user confirmation.
+    Delete a confirmed host.
 
     :param uid: User ID.
     :type uid: int or str
-    :param cond: User confirmation ('yes' or 'no').
-    :type cond: str
-    :param data: Host name.
-    :type data: str
+    :param host_data: Host name and state.
+    :type host_data: str
     :return: Success or error message.
     :rtype: str
     """
     host = host_data.split(" ")
-    if cond == "yes":
-        if host_del_db(uid, host[0], host[1]):
-            return f"Host: {host[0]} state {host[1]}has been removed from monitoring"
-        return "[Error: E002] Something went wrong. Name does not exist"
-    return "Please select option."
+    if host_del_db(uid, host[0], host[1]):
+        return f"Host: {host[0]} state {host[1]} has been removed from monitoring"
+    return "[Error: E002] Something went wrong. Name does not exist"
 
 
-def host_info(data):
+def host_info(uid, data):
     """
     Retrieve information about a host.
 
-    :param data: Host name.
+    :param uid: User ID.
+    :type uid: int or str
+    :param data: Host name and state.
     :type data: str
     :return: Confirmation text and inline keyboard markup.
-    :rtype: tuple[str, InlineKeyboardMarkup]
+    :rtype: tuple[str, InlineKeyboardMarkup] or tuple[str, None]
     """
-    text = f"Do you want to see host: {data}\n info?"
-    list_item_inline = [
-        InlineKeyboardButton("Yes", callback_data=f"inftrx_hostinfo_yes_{data}"),
-        InlineKeyboardButton("No", callback_data=f"inftrx_hostinfo_no_{data}")
-    ]
-    ver = InlineKeyboardMarkup([list_item_inline])
-    return text, ver
+    data = " ".join(data.split())
+    if not validate_host(data):
+        return "Wrong host, should be example.com open|closed", None
+    return confirm(uid, "hostinfo", data, f"Do you want to see host: {data}\n info?")
 
 
-def hostinfo(uid, cond, data):
+def hostinfo(uid, data):
     """
-    Process the retrieval of host information based on user confirmation.
+    Show the monitoring settings of a confirmed host.
 
     :param uid: User ID.
     :type uid: int or str
-    :param cond: User confirmation ('yes' or 'no').
-    :type cond: str
-    :param data: Host name.
+    :param data: Host name and state.
     :type data: str
     :return: Success or error message with host information.
     :rtype: str
     """
     host = data.split(" ")
-    if cond == "yes":
-        res = host_info_db(uid, f"{host[0]}_{host[1]}")
-        if res:
-            return f"Your host {host[0]} has been added\n in {res['time'].strftime('%Y-%m-%d %H:%M:%S')}"
-        return "[Error: host info] Something went wrong.)"
-    return "Please select option."
+    res = host_info_db(uid, f"{host[0]}_{host[1]}")
+    if res:
+        return (f"Your host {host[0]} has been added\n in {res['time'].strftime('%Y-%m-%d %H:%M:%S')}\n"
+                f"Ports: {res['port']} expected {res['state']}")
+    return "[Error: host info] Something went wrong. Name does not exist"
 
 
 def host_list(uid):
@@ -587,7 +634,7 @@ def host_add_db(uid, host_name, ports, state):
     :rtype: bool
     """
     sql = Sql()
-    sql.qinsert_host("Hosts", uid, host_name, ports, state)
+    sql.qinsert_host("Hosts", uid, host_name, ports, state.lower())
     return True
 
 
@@ -599,11 +646,16 @@ def host_del_db(uid, host_name, state):
     :type uid: int or str
     :param host_name: Host name.
     :type host_name: str
-    :return: True if successful.
+    :param state: State of the host.
+    :type state: str
+    :return: True if the host existed and was deleted.
     :rtype: bool
     """
     sql = Sql()
-    sql.qdelete("Hosts", uid, f"{host_name}_{state}")
+    data = f"{host_name}_{state.lower()}"
+    if not sql.qselect("Hosts", uid, data):
+        return False
+    sql.qdelete("Hosts", uid, data)
     return True
 
 
@@ -617,8 +669,7 @@ def host_list_db(uid):
     :rtype: list[dict]
     """
     sql = Sql()
-    res = sql.qselectall("Hosts", uid)
-    return res
+    return sql.qselectall("Hosts", uid)
 
 
 def host_info_db(uid, data):
@@ -627,82 +678,111 @@ def host_info_db(uid, data):
 
     :param uid: User ID.
     :type uid: int or str
-    :param data: Host name.
+    :param data: Host name and state joined by ``_``.
     :type data: str
     :return: Detailed information about the host.
     :rtype: dict or None
     """
     sql = Sql()
-    res = sql.qselect("Hosts", uid, data)
-    utils.logger.info("Hosts_info: %s ", res)
-    return res
+    return sql.qselect("Hosts", uid, data.lower())
+
+
+async def notify(uid, text):
+    """
+    Send an alert, logging instead of failing when the user cannot be reached.
+
+    :param uid: User ID.
+    :type uid: int or str
+    :param text: Alert text.
+    :type text: str
+    """
+    try:
+        await utils.post_tg(uid, text)
+    except telegram.error.TelegramError as err:
+        utils.logger.warning("Alert to %s failed: %s", uid, err)
+
+
+async def check_site(url):
+    """
+    Check a site, retrying to avoid alerts on transient failures.
+
+    :param url: Site URL.
+    :type url: str
+    :return: None if the site is up, otherwise the last failure reason.
+    :rtype: str | None
+    """
+    result = None
+    for attempt in range(SITE_CHECK_ATTEMPTS):
+        if attempt:
+            await asyncio.sleep(1)
+        result = await asyncio.to_thread(netutils.check_url, url)
+        if result is None:
+            return None
+    return result
+
+
+async def monitor_site(sql, url, semaphore):
+    """
+    Check one site and alert every user who monitors it.
+
+    :param sql: Database helper.
+    :type sql: Sql
+    :param url: Site URL.
+    :type url: str
+    :param semaphore: Limits concurrent checks.
+    :type semaphore: asyncio.Semaphore
+    """
+    async with semaphore:
+        utils.logger.info("Monitoring: %s", url)
+        result = await check_site(url)
+    if result:
+        for user in sql.qselect_users_by_sites("Sites", url):
+            await notify(user['uid'], f"Error:{result}, {url}")
+
+
+async def monitor_host(host, semaphore):
+    """
+    Scan one host and alert its owner if a port is not in the expected state.
+
+    :param host: Host entity.
+    :type host: Entity
+    :param semaphore: Limits concurrent scans.
+    :type semaphore: asyncio.Semaphore
+    """
+    utils.logger.info("Monitoring: %s %s %s", host['Hosts'], host['port'], host['state'])
+    try:
+        async with semaphore:
+            res = await netutils.scan_ports(host['Hosts'], netutils.parse_ports(host['port']))
+    except ValueError as err:
+        utils.logger.warning("Skipping host %s: %s", host['Hosts'], err)
+        return
+    unexpected = "closed" if host['state'] == "open" else "open"
+    res = {key: value for key, value in res.items() if value == unexpected}
+    if res:
+        await notify(host['uid'], f"Error:{host['Hosts']},\n {format_ports(res)}")
 
 
 async def worker() -> None:
     """
-    Worker process triggered by cron to monitor sites.
+    Worker process triggered by cron to monitor sites and hosts.
 
-    This function retrieves all sites from the database and checks their status.
-    If a site is down, it notifies all users monitoring that site.
+    Checks run concurrently; a failure of one check is logged and does not stop the others.
 
     :return: None
     :rtype: None
     """
-    timeout = 20
-    socket.setdefaulttimeout(timeout)
     sql = Sql()
-
-    url_all = sql.qselect_sites("Sites")
-
-    for site in url_all:
-        utils.logger.info("Monitoring: %s", site['Sites'])
-        result = ''
-        for _ in range(5):
-            time.sleep(1)
-            try:
-                with request.urlopen(site['Sites']) as _:
-                    break
-            except error.HTTPError as e:
-                result = e.code
-            except error.URLError as e:
-                result = e.reason
-        if result:
-            all_url_users = sql.qselect_users_by_sites("Sites", site['Sites'])
-            for _id in all_url_users:
-                await utils.post_tg(_id['uid'], f"Error:{result}, {site['Sites']}")
-
-    host_all = sql.qselect_hosts("Hosts")
-
-    for _host in host_all:
-        utils.logger.info("Monitoring: %s %s %s",
-                          _host['Hosts'], _host['port'], _host['state'])
-        res = nmap_host(_host['Hosts'], _host['port'])
-
-        if _host['state'] == "open" and "closed" in res.values():
-            res = {key: value for key, value in res.items() if value ==
-                   "closed"}
-            res = {
-                key: (
-                    "🟩on" if value == "open" else "🟥off" if value == "closed" else value)
-                for key, value in res.items()
-            }
-            res = yaml.dump(res, allow_unicode=True)
-            await utils.post_tg(_host['uid'], f"Error:{_host['Hosts']},\n {res}")
-
-        if _host['state'] == "closed" and "open" in res.values():
-            res = {key: value for key, value in res.items() if value == "open"}
-            res = {
-                key: ("🟩on" if value == "open" else "🟥off" if value ==
-                      "closed" else value)
-                for key, value in res.items()
-            }
-            res = yaml.dump(res, allow_unicode=True)
-            await utils.post_tg(_host['uid'], f"Error:{_host['Hosts']},\n {res}")
+    semaphore = asyncio.Semaphore(WORKER_CONCURRENCY)
+    tasks = [monitor_site(sql, site['Sites'], semaphore) for site in sql.qselect_sites("Sites")]
+    tasks += [monitor_host(host, semaphore) for host in sql.qselect_hosts("Hosts")]
+    for result in await asyncio.gather(*tasks, return_exceptions=True):
+        if isinstance(result, Exception):
+            utils.logger.error("Monitoring task failed", exc_info=result)
 
 
 def validate_url(url):
     """
-    Validate if the given string is a valid URL.
+    Validate if the given string is a valid public http(s) URL.
 
     :param url: The URL to validate.
     :type url: str
@@ -710,14 +790,11 @@ def validate_url(url):
     :rtype: bool
     """
     regex = re.compile(
-        r'^(?:http|ftp)s?://'  # http:// or https://
-        # domain...
-        r'(?:(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+(?:[A-Z]{2,6}\.?|[A-Z0-9-]{2,}\.?)|'
-        r'localhost|'  # localhost...
-        r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})'  # ...or ip
+        r'^https?://'
+        rf'{netutils.HOST_RE.pattern}'
         r'(?::\d+)?'  # optional port
         r'(?:/?|[/?]\S+)$', re.IGNORECASE)
-    return bool(re.match(regex, url))
+    return len(url) <= MAX_URL_LENGTH and bool(regex.match(url))
 
 
 def validate_host_ports(url):
@@ -730,12 +807,10 @@ def validate_host_ports(url):
     :rtype: bool
     """
     regex = re.compile(
-        # domain...
-        r'(?:(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+(?:[A-Z]{2,6}\.?|[A-Z0-9-]{2,}\.?)|'
-        r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})'  # ...or ip
+        rf'^{netutils.HOST_RE.pattern}'
         r' (?:\d+(?:-\d+)?(?:,\d+(?:-\d+)?)*)'  # ports
-        r' (?:open|closed|filtered)$', re.IGNORECASE)
-    return bool(re.match(regex, url))
+        r' (?:open|closed)$', re.IGNORECASE)
+    return bool(regex.match(url))
 
 
 def validate_host(url):
@@ -748,11 +823,9 @@ def validate_host(url):
     :rtype: bool
     """
     regex = re.compile(
-        # domain...
-        r'(?:(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+(?:[A-Z]{2,6}\.?|[A-Z0-9-]{2,}\.?)|'
-        r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})'  # ...or ip
-        r' (?:open|closed|filtered)$', re.IGNORECASE)
-    return bool(re.match(regex, url))
+        rf'^{netutils.HOST_RE.pattern}'
+        r' (?:open|closed)$', re.IGNORECASE)
+    return bool(regex.match(url))
 
 
 def whois_name(host_name):
@@ -765,19 +838,34 @@ def whois_name(host_name):
     :rtype: str
     """
     w = whois.whois(host_name)
-    return '\n'.join(f"{i}: {w[i]}" for i in w)
+    lines = []
+    for key, value in w.items():
+        if value:
+            if isinstance(value, list):
+                value = ", ".join(map(str, value))
+            lines.append(f"{key}: {value}")
+    return '\n'.join(lines) or "No whois data found."
 
 
-def whois_host(data):
+async def whois_host(uid, data):  # pylint: disable=unused-argument
     """
     Retrieve WHOIS information for a given host name.
 
+    :param uid: User ID.
+    :type uid: int or str
     :param data: The host name to query WHOIS information for.
     :type data: str
-    :return: WHOIS information formatted as key-value pairs, or None if the information could not be retrieved.
+    :return: WHOIS information formatted as key-value pairs.
     :rtype: tuple[str, None]
     """
-    return whois_name(data), None
+    host = data.strip().lower()
+    if not netutils.HOST_RE.fullmatch(host):
+        return "Wrong host, should be example.com", None
+    try:
+        text = await asyncio.to_thread(whois_name, host)
+    except (whois.exceptions.PywhoisError, OSError) as err:
+        return f"Whois lookup failed: {err}", None
+    return truncate(text), None
 
 
 def api_show(uid):
@@ -789,7 +877,7 @@ def api_show(uid):
     :return: API key information including usage instructions.
     :rtype: str
     """
-    api_hash = utils.gethashbyuid(uid)
+    api_hash = utils.gethashbyuid(uid) or utils.user_insert(uid)
     return f'''API_KEY: {api_hash}
 This key allows you to send custom messages to the telegram bot.
 How to use it: 👇
@@ -798,63 +886,97 @@ curl {os.environ.get("TELEGRAM_WEBHOOK_URL")}/tg \
 '''
 
 
-def scan_host(host_data):
+def apirotate(uid, data):  # pylint: disable=unused-argument
+    """
+    Replace the API key of a user after confirmation.
+
+    :param uid: User ID.
+    :type uid: int or str
+    :param data: Unused.
+    :type data: str
+    :return: The new API key.
+    :rtype: str
+    """
+    utils.rotate_key(uid)
+    return f"Your API key has been rotated.\n{api_show(uid)}"
+
+
+async def scan_host(uid, host_data):  # pylint: disable=unused-argument
     """
     Scan ports of a given host.
 
-    :param host_data: Host information including name and ports (e.g., example.com 22,80,443,8000-8010 open).
+    :param uid: User ID.
+    :type uid: int or str
+    :param host_data: Host name and optional ports (e.g., example.com 22,80,443,8000-8010).
     :type host_data: str
     :return: Port scan result and None.
-    :rtype: tuple[dict, None]
+    :rtype: tuple[str, None]
     """
-    hosts = host_data.split(" ")
-    if len(hosts) > 1:
-        res = nmap_host(hosts[0], hosts[1])
-    else:
-        res = nmap_host(hosts[0])
-    res = {key: ("🟩on" if value == "open" else "🟥off" if value ==
-                 "closed" else value) for key, value in res.items()}
-    res = yaml.dump(res, allow_unicode=True)
+    hosts = host_data.split()
+    if not 1 <= len(hosts) <= 2 or not netutils.HOST_RE.fullmatch(hosts[0]):
+        return "Wrong host, should be example.com or example.com 21-23,80,443", None
+    try:
+        ports = netutils.parse_ports(hosts[1] if len(hosts) > 1 else DEFAULT_SCAN_PORTS)
+        res = await netutils.scan_ports(hosts[0], ports)
+    except ValueError as err:
+        return f"Scan failed: {err}", None
+    return format_ports(res), None
 
-    return res, None
 
-
-def nmap_host(ip, ports="22,80,443,8000,8080,3128,3306"):
+def parse_tls_target(data):
     """
-    Perform a simple port scan using nmap.
+    Extract host and port from ``example.com``, ``example.com:8443`` or a URL.
 
-    :param ip: Hostname or IP address to scan.
-    :type ip: str
-    :param ports: Comma-separated list of ports or port ranges to scan, default is "22,80,443,8000,8080,3128,3306".
-    :type ports: str, optional
-    :return: Dictionary containing port status (Open, Closed, Error) for each port scanned.
-    :rtype: dict
+    :param data: User input.
+    :type data: str
+    :raises ValueError: if the input is not a valid host
+    :return: Host and port.
+    :rtype: tuple[str, int]
     """
-    port_list = []
-    port_ranges = ports.split(',')
+    data = data.strip()
+    parts = urlsplit(data if "://" in data else f"//{data}")
+    host = (parts.hostname or "").lower()
+    if not netutils.HOST_RE.fullmatch(host):
+        raise ValueError("Wrong host, should be example.com or example.com:443")
+    return host, parts.port or 443
 
-    for port_range in port_ranges:
-        if '-' in port_range:
-            start, end = map(int, port_range.split('-'))
-            port_list.extend(range(start, end + 1))
-        else:
-            port_list.append(int(port_range))
 
-    port_status = {}
+async def ssl_check(uid, data):  # pylint: disable=unused-argument
+    """
+    Show the TLS certificate of a host and how many days it is still valid.
 
-    for port in port_list:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(1)  # Timeout for each connection attempt
+    :param uid: User ID.
+    :type uid: int or str
+    :param data: Host, host:port or https URL.
+    :type data: str
+    :return: Certificate summary and None.
+    :rtype: tuple[str, None]
+    """
+    try:
+        host, port = parse_tls_target(data)
+        info = await asyncio.to_thread(netutils.certificate_info, host, port)
+    except ssl.SSLCertVerificationError as err:
+        return f"🟥 {data.strip()}: certificate is not trusted ({err.verify_message})", None
+    except (ValueError, OSError) as err:
+        return f"SSL check failed: {err}", None
+    days = info['days_left']
+    icon = "🟥" if days < 0 else "🟨" if days < SSL_WARNING_DAYS else "🟩"
+    san = ", ".join(info['san'][:10]) or "-"
+    return (f"{icon} {host}:{port}\n"
+            f"Subject: {info['subject']}\n"
+            f"Issuer: {info['issuer']}\n"
+            f"Valid from: {info['not_before']:%Y-%m-%d}\n"
+            f"Valid until: {info['not_after']:%Y-%m-%d} ({days} days left)\n"
+            f"Protocol: {info['version']}\n"
+            f"Names: {san}"), None
 
-        try:
-            result = sock.connect_ex((ip, port))
-            if result == 0:
-                port_status[port] = "open"
-            else:
-                port_status[port] = "closed"
-        except socket.error as err:
-            port_status[port] = f"Error: {err}"
-        finally:
-            sock.close()
 
-    return port_status
+CONFIRM_ACTIONS = {
+    "siteadd": siteadd,
+    "sitedel": sitedel,
+    "siteinfo": siteinfo,
+    "hostadd": hostadd,
+    "hostdel": hostdel,
+    "hostinfo": hostinfo,
+    "apirotate": apirotate,
+}

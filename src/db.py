@@ -26,8 +26,20 @@
 DB Module
 """
 
+import functools
 from google.cloud import datastore
 from google.cloud.datastore.query import PropertyFilter
+
+
+@functools.cache
+def get_client() -> datastore.Client:
+    """
+    Return the shared Datastore client, created on first use.
+
+    :return: Datastore client
+    :rtype: google.cloud.datastore.Client
+    """
+    return datastore.Client()
 
 
 class Sql:
@@ -41,8 +53,12 @@ class Sql:
     """
 
     def __init__(self):
-        self.client = datastore.Client()
         self.kind = "Users"
+
+    @property
+    def client(self) -> datastore.Client:
+        """Shared Datastore client."""
+        return get_client()
 
     def qselect(self, uid: str) -> str:
         """
@@ -70,7 +86,7 @@ class Sql:
         """
         query = self.client.query(kind=self.kind)
         query.add_filter(filter=PropertyFilter("uuid", '=', uuid))
-        result = query.fetch()
+        result = query.fetch(limit=1)
         return result
 
     def qinsert(self, uid: str, uuid: str) -> None:
@@ -100,8 +116,12 @@ class Cache:
     """
 
     def __init__(self):
-        self.client = datastore.Client()
         self.kind = "Position"
+
+    @property
+    def client(self) -> datastore.Client:
+        """Shared Datastore client."""
+        return get_client()
 
     def qselect(self, name: str) -> dict:
         """
