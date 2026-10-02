@@ -17,3 +17,12 @@
 __pycache__/
 # Ignored by the build system
 /setup.cfg
+# Development only files
+.github/
+tests/
+.pytest_cache/
+.pylintrc
+pytest.ini
+requirements-dev.txt
+AGENTS.md
+*.example

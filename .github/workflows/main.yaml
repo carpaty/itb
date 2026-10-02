@@ -4,60 +4,83 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
-  linting:
-    if: github.ref != 'refs/heads/main'
+  checks:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - name: Set up Python 312
-        uses: actions/setup-python@v3
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v7
         with:
-          python-version: 3.12
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements*.txt
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pylint pycodestyle
-          pip install -r requirements.txt
-      - name: Analysing the code with pylint
+          pip install -r requirements-dev.txt
+
+      - name: Prepare example configs
         run: |
           cp src/calls/button_func.py.example src/calls/button_func.py
           cp src/menu.yaml.example src/menu.yaml
-          pylint $(git ls-files '*.py' '*.py.example')
-          pycodestyle --count --max-line-length=120 $(git ls-files '*.py' '*.py.example')
+
+      - name: Analysing the code with pylint
+        run: pylint $(git ls-files '*.py' '*.py.example')
+
+      - name: Checking code style
+        run: pycodestyle --count --max-line-length=120 $(git ls-files '*.py' '*.py.example')
+
+      - name: Running tests
+        run: pytest
 
   release:
-    if: github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: checks
     runs-on: ubuntu-latest
+    concurrency:
+      group: deploy-appengine
+      cancel-in-progress: false
     permissions:
-      contents: "read"
-      id-token: "write"
+      contents: read
+      id-token: write
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+
       - name: Copy files
         run: |
           cp src/calls/button_func.py.example src/calls/button_func.py
           cp src/menu.yaml.example src/menu.yaml
           cp app.yaml.example app.yaml
 
-      - id: "auth"
+      - id: auth
         name: Register gcloud
-        uses: "google-github-actions/auth@v2"
+        uses: google-github-actions/auth@v3
         with:
           workload_identity_provider: ${{ secrets.PROVIDER }}
           service_account: ${{ secrets.SERVICE_ACCOUNT }}
 
-      - id: "deploy"
+      - id: deploy
         name: Deploying
-        uses: "google-github-actions/deploy-appengine@v2"
+        uses: google-github-actions/deploy-appengine@v3
         with:
           project_id: infratrix
           env_vars: |-
             TELEGRAM_TOKEN=${{ secrets.TELEGRAM_TOKEN }}
             TELEGRAM_WEBHOOK_URL=${{ secrets.TELEGRAM_WEBHOOK_URL }}
 
-      - id: "test"
+      - id: test
         name: Testing release
-        run: 'curl "${{ steps.deploy.outputs.version_url }}"'
+        env:
+          VERSION_URL: ${{ steps.deploy.outputs.version_url }}
+        run: curl --fail --silent --show-error --retry 3 "$VERSION_URL/healthcheck"
